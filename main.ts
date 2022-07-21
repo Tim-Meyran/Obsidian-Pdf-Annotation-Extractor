@@ -1,137 +1,255 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import {Plugin, TFile} from "obsidian";
+import {BetterPdfSettings, BetterPdfSettingsTab} from "./settings";
+import * as pdfjs from "pdfjs-dist";
 
-// Remember to rename these classes and interfaces!
+import PdfAnnotationExtractor from "./src/PdfannotationExtractor";
+import {Emoji} from "./emoji";
 
-interface MyPluginSettings {
-	mySetting: string;
+// @ts-ignore
+import worker from "pdfjs-dist/build/pdf.worker.entry";
+import * as Pdf_viewer from "pdfjs-dist/web/pdf_viewer";
+import {off} from "codemirror";
+
+interface PdfNodeParameters {
+	range: Array<number>;
+	url: string;
+	link: boolean;
+	page: number;
+	scale: number;
+	fit: boolean,
+	rotation: number;
+	rect: Array<number>;
+	id: string;
 }
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
-}
-
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+export default class BetterPDFPlugin extends Plugin {
+	settings: BetterPdfSettings;
 
 	async onload() {
-		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
+		console.log("Better PDF loading...");
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
+		this.settings = Object.assign(new BetterPdfSettings(), await this.loadData());
 
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
+
+		this.addRibbonIcon('sync', 'Extract annotations', () => this.processPDFHighlights());
+
+		this.addSettingTab(new BetterPdfSettingsTab(this.app, this));
+
+		pdfjs.GlobalWorkerOptions.workerSrc = worker;
+
+		this.registerMarkdownCodeBlockProcessor("pdf-annotation", async (src, el, ctx) => {
+			// Get Parameters
+			let parameters: PdfNodeParameters | null = null;
+			try {
+				parameters = this.readParameters(src);
+			} catch (e) {
+				el.createEl("h2", {text: "PDF Parameters invalid: " + e.message});
 			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
+
+
+			//Create PDF Node
+			if (parameters !== null) {
+				try {
+					if (parameters.url.startsWith("./")) {
+						// find the substring of path all the way to the last slash
+						const filePath = ctx.sourcePath;
+						const folderPath = filePath.substring(0, filePath.lastIndexOf("/"));
+						parameters.url = folderPath + "/" + parameters.url.substring(2, parameters.url.length);
 					}
+					//Read Document
+					const arrayBuffer = await this.app.vault.adapter.readBinary(parameters.url);
+					const buffer = Buffer.from(arrayBuffer);
+					const document = await pdfjs.getDocument(buffer).promise;
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
+
+					//Read pages
+					const page = await document.getPage(parameters.page);
+					let host = el;
+
+					let annotations = await page.getAnnotations()
+
+					let annotation = annotations.filter(a => a.id == parameters?.id).first()
+
+					if (annotation) {
+						//el.createEl("h2", {text: parameters.page + " " + annotation.id});
+						//el.createEl("h2", {text: JSON.stringify(annotation)});
+						el.createEl("br")
+
+						let rect = annotation.rect//a.parentRect ? a.parentRect : a.rect
+
+						if (!parameters) return;
+
+
+						if (annotation.parentRect) return;
+
+
+						// Create hyperlink for Page
+						if (parameters.link) {
+							const href = el.createEl("a");
+							href.href = parameters.url + "#page=" + parameters.page;
+							href.className = "internal-link";
+							host = href;
+						}
+
+						// Render Canvas
+						const canvas = host.createEl("canvas");
+
+						canvas.style.width = "100%";
+
+
+						canvas.style.padding = '0';
+						canvas.style.margin = 'auto';
+						canvas.style.display = 'block';
+
+						const context = canvas.getContext("2d");
+
+						let scale = this.settings.scale
+
+						const baseViewport = page.getViewport({scale: 1});
+						const baseViewportWidth = baseViewport.width;
+						const baseViewportHeight = baseViewport.height;
+						const baseScale = canvas.clientWidth / baseViewportWidth;
+
+						let width = rect[2] - rect[0]
+						let height = rect[3] - rect[1]
+
+
+						width *= scale
+						height *= scale
+
+						let offsetX = -rect[0] * scale
+						let offsetY = -(baseViewportHeight - rect[3]) * scale
+
+						const viewport = page.getViewport({
+							scale: scale,
+							rotation: parameters.rotation,
+							offsetX: offsetX,
+							offsetY: offsetY,
+						});
+
+
+						canvas.width = Math.floor(width);
+						canvas.height = Math.floor(height);
+
+
+						const renderContext = {
+							canvasContext: context,
+							viewport: viewport,
+						};
+
+						{ // @ts-ignore
+							await page.render(renderContext);
+						}
+					}
+				} catch (error) {
+					console.error(error)
+					el.createEl("h2", {text: error});
 				}
 			}
 		});
+	}
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
+	private readParameters(jsonString: string) {
+		// "url" : [[file.pdf]] is an invalid json since it misses quotation marks in value
+		if (jsonString.contains("[[") && !jsonString.contains('"[[')) {
+			jsonString = jsonString.replace("[[", '"[[');
+			jsonString = jsonString.replace("]]", ']]"');
+		}
 
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
+		const parameters: PdfNodeParameters = JSON.parse(jsonString);
 
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+		//Transform internal Link to external
+		if (parameters.url.startsWith("[[")) {
+			parameters.url = parameters.url.substr(2, parameters.url.length - 4);
+			// @ts-ignore
+			parameters.url = this.app.metadataCache.getFirstLinkpathDest(
+				parameters.url,
+				""
+			).path;
+		}
+
+		if (parameters.link === undefined) {
+			parameters.link = this.settings.link_by_default;
+		}
+
+		if (
+			parameters.scale === undefined ||
+			parameters.scale < 0.1 ||
+			parameters.scale > 10.0
+		) {
+			parameters.scale = 1.0;
+		}
+
+		if (parameters.fit === undefined) {
+			parameters.fit = this.settings.fit_by_default;
+		}
+
+		if (parameters.rotation === undefined) {
+			parameters.rotation = 0;
+		}
+
+		if (parameters.rect === undefined) {
+			parameters.rect = [0, 0, 0, 0];
+		}
+		return parameters;
+	}
+
+	async saveHighlightsToFile(filePath: string, mdString: string) {
+		const fileExists = await this.app.vault.adapter.exists(filePath);
+		if (fileExists) {
+			await this.appendHighlightsToFile(filePath, mdString);
+		} else {
+			await this.app.vault.create(filePath, mdString);
+		}
+	}
+
+	async appendHighlightsToFile(filePath: string, note: string) {
+		let existingContent = await this.app.vault.adapter.read(filePath);
+		if (existingContent.length > 0) {
+			existingContent = existingContent + '\r\r';
+		}
+		await this.app.vault.adapter.write(filePath, existingContent + note);
+	}
+
+	extractAnnotations(pdfFile: string, markDownFile: string) {
+
+	}
+
+	private async processPDFHighlights() {
+		let searchDirectory = this.settings.searchPath
+		let annotationDirectory = this.settings.annotationPath
+
+		if (!await this.app.vault.adapter.exists(searchDirectory)) {
+			await this.app.vault.adapter.mkdir(searchDirectory)
+		}
+
+		if (!await this.app.vault.adapter.exists(annotationDirectory)) {
+			await this.app.vault.adapter.mkdir(annotationDirectory)
+		}
+
+		let files = (await this.app.vault.adapter.list(searchDirectory)).files
+
+		for (const f of files) {
+
+			if (!f.endsWith('.pdf')) continue;
+			let filePath = f//
+				.replace(searchDirectory, annotationDirectory)//
+				.replace(".pdf", ".md");
+
+
+			let md = await new PdfAnnotationExtractor().extract(f, this.app, this.settings)
+
+			await this.app.vault.adapter.write(filePath, md);
+
+
+			//extractAnnotations(f, filePath)
+
+		}
+
 	}
 
 	onunload() {
-
-	}
-
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-	}
-
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
-}
-
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
-
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
-
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
-
-	display(): void {
-		const {containerEl} = this;
-
-		containerEl.empty();
-
-		containerEl.createEl('h2', {text: 'Settings for my awesome plugin.'});
-
-		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					console.log('Secret: ' + value);
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
+		console.log("unloading Better PDF plugin...");
 	}
 }
