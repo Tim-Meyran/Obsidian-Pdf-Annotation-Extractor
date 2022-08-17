@@ -1,4 +1,4 @@
-import {Plugin, TFile} from "obsidian";
+import {Editor, Hotkey, MarkdownView, Plugin, TFile} from "obsidian";
 import {BetterPdfSettings, BetterPdfSettingsTab} from "./settings";
 import * as pdfjs from "pdfjs-dist";
 
@@ -9,6 +9,7 @@ import {Emoji} from "./emoji";
 import worker from "pdfjs-dist/build/pdf.worker.entry";
 import * as Pdf_viewer from "pdfjs-dist/web/pdf_viewer";
 import {off} from "codemirror";
+import {mkdirSync} from "fs";
 
 interface PdfNodeParameters {
 	range: Array<number>;
@@ -33,6 +34,20 @@ export default class BetterPDFPlugin extends Plugin {
 
 
 		this.addRibbonIcon('sync', 'Extract annotations', () => this.processPDFHighlights());
+
+		this.addCommand({
+			id: 'Create-Paper-Table',
+			name: 'Create Paper Table',
+			hotkeys: [],
+			editorCallback: async (editor: Editor, view: MarkdownView) => {
+				let lines = await this.createTable()
+				lines.forEach(line => {
+					if (!editor.getValue().contains(line)) {
+						editor.setValue(editor.getValue() + line)
+					}
+				})
+			}
+		});
 
 		this.addSettingTab(new BetterPdfSettingsTab(this.app, this));
 
@@ -150,6 +165,7 @@ export default class BetterPDFPlugin extends Plugin {
 		});
 	}
 
+
 	private readParameters(jsonString: string) {
 		// "url" : [[file.pdf]] is an invalid json since it misses quotation marks in value
 		if (jsonString.contains("[[") && !jsonString.contains('"[[')) {
@@ -238,15 +254,34 @@ export default class BetterPDFPlugin extends Plugin {
 				.replace(".pdf", ".md");
 
 
-			let md = await new PdfAnnotationExtractor().extract(f, this.app, this.settings)
-
-			await this.app.vault.adapter.write(filePath, md);
+			let md: string = await new PdfAnnotationExtractor().extract(f, this.app, this.settings)
+			if (md.length > 0)
+				await this.app.vault.adapter.write(filePath, md);
 
 
 			//extractAnnotations(f, filePath)
 
 		}
 
+	}
+
+	private async createTable(): Promise<string[]> {
+		let searchDirectory = this.settings.searchPath
+
+		let files = (await this.app.vault.adapter.list(searchDirectory)).files
+
+		let result: string[] = []
+
+		for (const f of files) {
+			if (!f.endsWith('.pdf')) continue;
+
+			let file = f
+				.replace(searchDirectory, "")//
+				.replace("/", "")//
+
+			result.push("* [ ] [[" + file + "]] \n")
+		}
+		return result
 	}
 
 	onunload() {
