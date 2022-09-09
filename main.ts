@@ -33,7 +33,10 @@ export default class BetterPDFPlugin extends Plugin {
 		this.settings = Object.assign(new BetterPdfSettings(), await this.loadData());
 
 
-		this.addRibbonIcon('sync', 'Extract annotations', () => this.processPDFHighlights());
+		const statusItem = this.addStatusBarItem();
+
+
+		this.addRibbonIcon('sync', 'Extract annotations', () => this.processPDFHighlights(statusItem));
 
 		this.addCommand({
 			id: 'Create-Paper-Table',
@@ -232,7 +235,7 @@ export default class BetterPDFPlugin extends Plugin {
 
 	}
 
-	private async processPDFHighlights() {
+	private async processPDFHighlights(statusItem: HTMLElement) {
 		let searchDirectory = this.settings.searchPath
 		let annotationDirectory = this.settings.annotationPath
 
@@ -246,6 +249,17 @@ export default class BetterPDFPlugin extends Plugin {
 
 		let files = (await this.app.vault.adapter.list(searchDirectory)).files
 
+		let fileCount = files.length
+		let progress = 0
+
+		let label = statusItem.createEl("span", {text: "Extracting annotations"});
+
+		let progressBar = statusItem.createEl("progress");
+		progressBar.setAttribute("value", progress.toString())
+		progressBar.setAttribute("max", fileCount.toString())
+
+		console.log("processPDFHighlights")
+
 		for (const f of files) {
 
 			if (!f.endsWith('.pdf')) continue;
@@ -253,15 +267,20 @@ export default class BetterPDFPlugin extends Plugin {
 				.replace(searchDirectory, annotationDirectory)//
 				.replace(".pdf", ".md");
 
+			console.log("extracting " + f)
+
 
 			let md: string = await new PdfAnnotationExtractor().extract(f, this.app, this.settings)
 			if (md.length > 0)
 				await this.app.vault.adapter.write(filePath, md);
 
-
+			progress += 1
+			progressBar.setAttribute("value", progress.toString())
 			//extractAnnotations(f, filePath)
 
 		}
+		statusItem.removeChild(label)
+		statusItem.removeChild(progressBar)
 
 	}
 
